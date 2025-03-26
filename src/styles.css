@@ -1,0 +1,42 @@
+body {
+  background-color: #fafafa;
+}
+
+.main {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  -webkit-transform: translate(-50%, -50%);
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+}
+
+.misc {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  margin: 10px;
+}
+
+.unsupported {
+  display: none;
+}
+
+/* 添加过渡动画 */
+#counter {
+  transition: color 0.3s ease;
+}
+
+/* 低电量样式 */
+#counter.low-time {
+  color: #ff4757;
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.5; }
+  100% { opacity: 1; }
+}

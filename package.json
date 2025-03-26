@@ -1,0 +1,29 @@
+{
+  "name": "waterctl_tauri",
+  "private": true,
+  "version": "2.0.5",
+  "type": "module",
+  "scripts": {
+    "compile-wasm": "wat2wasm ./src/deputy.wat -o ./src/deputy.wasm",
+    "devo": "npm run compile-wasm && vite dev",
+    "dev": "vite dev",
+    "build": "npm run compile-wasm && tsc && vite build",
+    "preview": "vite preview",
+    "test": "vitest"
+  },
+  "devDependencies": {
+    "@fullhuman/postcss-purgecss": "^6.0.0",
+    "@tauri-apps/cli": "^2.4.0",
+    "typescript": "^5.8.2",
+    "vite": "^5.4.15",
+    "vite-plugin-html": "^3.2.2",
+    "vite-plugin-singlefile": "^2.2.0",
+    "vite-plugin-tauri": "^4.0.0",
+    "vitest": "^2.1.9",
+    "wabt": "^1.0.37"
+  },
+  "dependencies": {
+    "@mnlphlp/plugin-blec": "^0.4.1",
+    "water.css": "^2.1.1"
+  }
+}

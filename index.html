@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="favicon.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="深圳市常工电子“蓝牙水控器”控制程序的开源实现。适用于国内各大高校宿舍热水器。" />
+    <meta name="theme-color" content="#fafafa" />
+    <link rel="apple-touch-icon" href="logo192.png" />
+    <!-- <link rel="manifest" href="manifest.json" /> -->
+    <title>蓝牙水控器 FOSS</title>
+  </head>
+
+  <body>
+    <div class="main supported">
+      <noscript>需要启用 JavaScript。</noscript>
+      <button id="main-button" style="margin: 0%">开启</button>
+      <p id="device-name" style="margin-top: 10px; margin-bottom: 10px">未连接</p>
+      <p id="counter" style="margin-top: 10px; margin-bottom: 10px" class="low-time">
+        剩余时间：00:00
+      </p>
+    </div>
+    <div class="main unsupported">
+      <h3>不支持的浏览器</h3>
+      <p>需要支持蓝牙的浏览器，如 Chrome 或 Edge。</p>
+      <p>
+        <a href="https://github.com/celesWuff/waterctl/blob/2.x/FAQ.md" target="_blank"><button>查看支持列表</button></a>
+      </p>
+    </div>
+
+    <!-- <div class="misc">
+      <button id="install-button" hidden>将蓝牙水控器 FOSS 安装到系统</button>
+      <p style="font-size: smaller; color: gray; margin: 0%">
+        <a href="https://github.com/celesWuff/waterctl" target="_blank">源代码</a> ·
+        <a href="https://github.com/celesWuff/waterctl/blob/2.x/FAQ.md" target="_blank">疑难解答</a>
+        <span id="version"></span>
+        <br />
+        <span style="font-size: smaller">copyright (c) 2024 celesWuff, licensed under MIT License</span>
+      </p>
+    </div> -->
+
+    <dialog id="dialog">
+      <header>出现错误</header>
+      <form method="dialog">
+        <p id="dialog-content"></p>
+        <pre id="dialog-debug-container"><code id="dialog-debug-content"></code></pre>
+        <menu style="display: flex; justify-content: flex-end">
+          <button onclick="succeeded = false">好</button>
+        </menu>
+      </form>
+    </dialog>
+  </body>
+
+  <script type="module" src="/src/index.ts"></script>
+</html>
