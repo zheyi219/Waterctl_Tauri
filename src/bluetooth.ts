@@ -74,9 +74,9 @@ async function disconnect() {
 
   //reconnect after 400ms
   if (autoReconnect) {
-    setTimeout(() => {
-      start();
-    }, 400);
+    // setTimeout(() => {
+    start();
+    // }, 400);
   }
 
 }
@@ -96,9 +96,17 @@ async function handleBluetoothError(error: unknown) {
     dialogDebugContent.textContent = "调试信息：\n" + getLogs().join("\n");
   }
 
-  (document.getElementById("dialog")! as HTMLDialogElement).showModal();
+  const dialog = document.getElementById("dialog") as HTMLDialogElement;
+  dialog.showModal(); // 显示对话框
 
-  if (isFatal) await disconnect();
+  // 3秒后关闭对话框
+  if (autoReconnect) {
+    setTimeout(() => {
+      dialog.close(); // 关闭对话框
+    }, 3000);
+  }
+
+  if (isFatal || autoReconnect) await disconnect();
 }
 
 // RXD数据处理
@@ -289,8 +297,14 @@ export function handleButtonClick() {
   }
 }
 
-// // 初始化
-// document.addEventListener("DOMContentLoaded", () => {
-//   const mainButton = document.getElementById("main-button")!;
-//   mainButton.addEventListener("click", handleButtonClick);
-// });
+//自动重连
+document.addEventListener("DOMContentLoaded", () => {
+  if (autoReconnect) {
+    setInterval(() => {
+      const mainButton = document.getElementById("main-button") as HTMLButtonElement;
+      if (mainButton.innerText == "开启") {
+        start();
+      }
+    }, 5000);
+  }
+});

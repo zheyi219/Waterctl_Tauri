@@ -25,4 +25,4 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           git merge upstream/2.x --no-edit
-          git push origin main
+          git push origin main –allow-unrelated-histories
