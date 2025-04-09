@@ -40,6 +40,7 @@ function updateUi(stage: "pending" | "ok" | "standby") {
       mainButton.textContent = "请稍候";
       mainButton.disabled = true;
       deviceName.textContent = "已连接：" + bluetoothdevice.name!;
+      setupTimeoutMessage();
       break;
     case "ok":
       mainButton.textContent = "结束";
