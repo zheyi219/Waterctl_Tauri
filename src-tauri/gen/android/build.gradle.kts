@@ -1,5 +1,9 @@
 buildscript {
     repositories {
+        // 替换为阿里云镜像
+        maven { url = uri("https://maven.aliyun.com/repository/google") }
+        maven { url = uri("https://maven.aliyun.com/repository/public") }
+        // 保留原始仓库作为备用
         google()
         mavenCentral()
     }
@@ -11,6 +15,9 @@ buildscript {
 
 allprojects {
     repositories {
+        // 同步镜像配置
+        maven { url = uri("https://maven.aliyun.com/repository/google") }
+        maven { url = uri("https://maven.aliyun.com/repository/public") }
         google()
         mavenCentral()
     }
