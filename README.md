@@ -17,6 +17,15 @@
 
   这部分代码中的 `Water36088` 需要改为你的蓝牙水控器的蓝牙名称，保存。
 
+- 在 GitHub 仓库设置以下环境变量（apk编译需要）：
+
+  ```
+  ANDROID_RELEASE_KEYSTORE --> 你的 keystore 文件经过 Base64 编码后的内容
+  ANDROID_RELEASE_PASSWORD --> keystore 的密码
+  ANDROID_RELEASE_KEY --> 密钥名称
+  ANDROID_RELEASE_KEY_PASSWORD --> 密钥的密码
+  ```
+
 - 等待 github action 的 workflow 编译并发布好 release,即可在最新的 release 界面下载你想要的包并开始使用了
 - 不能用？请先看看”疑难解答“： https://github.com/celesWuff/waterctl/blob/2.x/FAQ.md
 
