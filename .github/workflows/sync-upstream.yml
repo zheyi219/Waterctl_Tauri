@@ -26,7 +26,7 @@ jobs:
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
-          git merge upstream/2.x --no-edit
+          git merge upstream/2.x --allow-unrelated-histories --no-edit
           git checkout -b sync/upstream-$(date +%s) 
 
       - name: Create Pull Request
