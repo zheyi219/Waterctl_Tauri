@@ -1,5 +1,3 @@
-import { isMobileDevice } from "./utils";
-
 interface ErrorCase {
   isHit: (msg: string) => boolean;
   output: (container: HTMLElement, error: unknown) => void;
@@ -40,27 +38,27 @@ const errorCases: ErrorCase[] = [
     showLogs: true,
   },
   {
-    isHit: (msg) => !!msg.match(/User denied the browser permission/) || (isMobileDevice() && !!msg.match(/NotFoundError|Bluetooth adapter not available/)),
+    isHit: (msg) => !!msg.match(/No Services matching UUID|GATT Error: Not supported/),
     output: (container) => {
-      container.innerText = "未授予蓝牙权限。\n\n请前往手机设置，授予浏览器“附近设备”权限。\n详情请参考源代码仓库内的";
-      container.innerHTML += "<a href='https://github.com/celesWuff/waterctl/blob/2.x/FAQ.md' target='_blank'>“疑难解答”</a>。";
+      container.innerText = "不支持的机型。\n\n如果您有能力，欢迎一同参与蓝牙水控器 FOSS 的开发。\n详情请参考";
+      container.innerHTML += "<a href='https://github.com/celesWuff/waterctl' target='_blank'>源代码仓库</a>。";      
     },
     isFatal: true,
     showLogs: false,
   },
   {
-    isHit: (msg) => !isMobileDevice() && !!msg.match(/NotFoundError|Bluetooth adapter not available/),
+    isHit: (msg) => !!msg.match(/User denied the browser permission|Web Bluetooth is not supported|Bluetooth adapter not available/),
     output: (container) => {
-      container.innerText = "设备不支持蓝牙，或未授予蓝牙权限。\n\n详情请参考源代码仓库内的";
-      container.innerHTML += "<a href='https://github.com/celesWuff/waterctl/blob/2.x/FAQ.md' target='_blank'>“疑难解答”</a>。";
+      container.innerText = "设备不支持蓝牙，或浏览器权限未开启。\n\n请参考";
+      container.innerHTML += "<a href='https://github.com/celesWuff/waterctl/blob/2.x/FAQ.md' target='_blank'>“疑难解答”</a>，按步骤逐步排查。";
     },
     isFatal: true,
     showLogs: false,
   },
   {
-    isHit: (msg) => !!msg.match(/NetworkError|GATT operation failed/),
+    isHit: (msg) => !!msg.match(/NetworkError|GATT operation failed|GATT Error Unknown/),
     output: (container) => {
-      container.innerText = "连接不稳定，无法与水控器建立连接。\n请重试。";
+      container.innerText = "连接不稳定，与水控器通信失败。\n请重试。";
     },
     isFatal: true,
     showLogs: false,

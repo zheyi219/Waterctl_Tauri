@@ -84,8 +84,19 @@ async function disconnect() {
 
 // 错误处理
 async function handleBluetoothError(error: unknown) {
-  const dialogContent = document.getElementById("dialog-content")!;
-  const dialogDebugContainer = document.getElementById("dialog-debug-container")!;
+  // this is so fucking ugly but i have no choice
+  // you would never know how those shitty browsers behave
+  if (!error) throw error;
+
+  const e = error.toString();
+
+  if (e.match(/User cancelled/) || e == "2") {
+    // "2" is a weird behavior of Bluefy browser on iOS
+    return;
+  }
+
+  const dialogContent = document.getElementById("dialog-content") as HTMLParagraphElement;
+  const dialogDebugContainer = document.getElementById("dialog-debug-container") as HTMLPreElement;
   const dialogDebugContent = document.getElementById("dialog-debug-content")!;
 
   const { output, isFatal, showLogs } = resolveError(error);
@@ -206,6 +217,10 @@ async function handleRxdData(data: Uint8Array) {
       case 0xB3:
         await writeValue(endEpilogue);
         await disconnect();
+        case 0xAA: // telemetry, no need to respond
+        case 0xB5: // temperature settings related, no need to respond
+        case 0xB8: // unknown, no need to respond
+          break;
         break;
       case 0xBA:
         await writeValue(baAck);
@@ -215,9 +230,6 @@ async function handleRxdData(data: Uint8Array) {
         break;
       case 0xC8:
         throw new Error("WATERCTL INTERNAL Refused");
-      case 0xAA://不知道是什么，总是在第一次连接的时候出现
-        console.warn("Unhandled RXD type:", dType);
-        break;
       default:
         // console.warn("Unhandled RXD type:", dType);
         throw new Error("WATERCTL INTERNAL Unknown RXD data");
