@@ -8,6 +8,8 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 新增权限用于创建 PR
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,4 +27,14 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           git merge upstream/2.x --no-edit
-          git push origin main –allow-unrelated-histories
+          git checkout -b sync/upstream-$(date +%s) 
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v5
+        with:
+          commit-message: "Sync upstream changes"
+          title: "Sync upstream changes from 2.x branch"
+          body: "Automated PR syncing upstream changes"
+          branch: "sync/upstream"  # 分支基础名称
+          base: main  # 目标分支
+          labels: automated,upstream-sync
