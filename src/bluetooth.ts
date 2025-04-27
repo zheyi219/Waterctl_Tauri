@@ -76,7 +76,7 @@ async function disconnect() {
   //reconnect after 400ms
   if (autoReconnect) {
     setTimeout(() => {
-    start();
+      start();
     }, 400);
   }
 
@@ -217,10 +217,10 @@ async function handleRxdData(data: Uint8Array) {
       case 0xB3:
         await writeValue(endEpilogue);
         await disconnect();
-        case 0xAA: // telemetry, no need to respond
-        case 0xB5: // temperature settings related, no need to respond
-        case 0xB8: // unknown, no need to respond
-          break;
+        break;
+      case 0xAA: // telemetry, no need to respond
+      case 0xB5: // temperature settings related, no need to respond
+      case 0xB8: // unknown, no need to respond
         break;
       case 0xBA:
         await writeValue(baAck);
