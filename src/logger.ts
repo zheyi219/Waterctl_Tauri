@@ -1,7 +1,7 @@
 const logs: string[] = [];
 
 export function log(message: string) {
-  console.log(message);
+  console.warn(message);
   logs.push(message);
 }
 

@@ -55,7 +55,7 @@ function updateUi(stage: "pending" | "ok" | "standby") {
       mainButton.disabled = false;
       deviceName.textContent = "未连接";
       //countdown end
-      countdown.stop();
+      if (countdown) countdown.stop();
       break;
   }
 }
@@ -63,7 +63,7 @@ function updateUi(stage: "pending" | "ok" | "standby") {
 // 断开连接处理
 async function disconnect() {
   try {
-    if (bluetoothdevice.isConnected) await bleDisconnect();
+    if (bluetoothdevice && bluetoothdevice.isConnected) await bleDisconnect();
   } catch (error) {
     console.error("Disconnect error:", error);
   }
@@ -125,7 +125,7 @@ async function handleBluetoothError(error: unknown) {
 // 用于存储最近接收到的数据及其出现次数
 const recentDataMap = new Map<string, number>();
 // 最大重复次数
-const MAX_DUPLICATE_COUNT = 3;
+const MAX_DUPLICATE_COUNT = 2;
 
 async function handleRxdData(data: Uint8Array) {
   // 将数据转换为字符串，用于作为Map的键
@@ -250,59 +250,97 @@ function setupTimeoutMessage() {
 
 // 主业务流程
 let isScanning = false;
+let isConnecting = false;
 async function start() {
-  if (isScanning) {
+  if (isScanning || isConnecting) {
+    console.log("Scanning or connecting...");
     return;
   }
   try {
     isScanning = true;
     console.log("Starting scan");
-    startScan(async (devices: BleDevice[]) => {
+    startScan((devices: BleDevice[]) => {
       for (const device of devices) {
         // 记录扫描到的蓝牙设备
-        log(`Scanned device: ${device.name}, address: ${device.address}`);
+        console.log(`Scanned device: ${device.name}, address: ${device.address}`);
         if (device.name === DEVICE_NAME) {
           console.log("Found device:", device);
           stopScan();
           bluetoothdevice = device;
           updateUi("pending");
-          try {
-            // 添加连接错误处理
-            await connect(device.address, () => {
-              console.log("Disconnected");
-              disconnect();
-            });
-          } catch (error) {
-            handleBluetoothError(error);
-            isScanning = false;
-            return; // 提前退出
-          }
-          // 需要为订阅和发送操作添加错误处理
-          try {
-            // 订阅RXD特征
-            await subscribe(RXD_UUID, handleRxdData);
-            log("成功订阅RXD特征");
-          } catch (subscribeError) {
-            handleBluetoothError(subscribeError);
-            isScanning = false;
-            return;
-          }
+          isConnecting = true;
+          // 添加连接错误处理
+          connect(device.address, () => {
+            console.log("Disconnected");
+            disconnect();
+          })
+            .catch((error) => {
+              isConnecting = false;
+              isScanning = false;
+              handleBluetoothError(error);
+              return; // 提前退出
+            })
+            .then(() => {
+              // if (!bluetoothdevice.isConnected) {
+              //   isConnecting = false;
+              //   isScanning = false;
+              //   handleBluetoothError("WATERCTL INTERNAL Device not connected");
+              //   return; // 提前退出
+              // }
+              // 需要为订阅和发送操作添加错误处理
+              log("成功连接设备");
+              isConnecting = false;
+              // 订阅RXD特征
+              subscribe(RXD_UUID, handleRxdData)
+                .catch((subscribeError) => {
+                  isScanning = false;
+                  handleBluetoothError(subscribeError);
+                  return;
+                })
+                .then(() => {
+                  log("成功订阅RXD特征");
 
-          try {
-            // 发送启动序章
-            await send(TXD_UUID, startPrologue);
-            log("成功发送启动序章");
-          } catch (sendError) {
-            handleBluetoothError(sendError);
-            isScanning = false;
-            return;
-          }
-          setupTimeoutMessage();
+                  // 发送启动序章
+                  send(TXD_UUID, startPrologue)
+                    .catch((sendError) => {
+                      isScanning = false;
+                      handleBluetoothError(sendError);
+                      return;
+                    }).then(() => {
+                      log("成功发送启动序章");
+                    });
+
+                });
+            });
+
+
+          // setupTimeoutMessage();
           break;
         }
       }
       isScanning = false;
-    }, 15000);
+    }, 15000)
+      .then(() => {
+        console.log("Scan completed");
+        if (!bluetoothdevice) {
+          isScanning = false;
+          // handleBluetoothError("WATERCTL INTERNAL Device not found");
+          console.log("Device not found");
+          // 尝试重新扫描
+          disconnect();
+        } else if (!bluetoothdevice.isConnected) {
+          isScanning = false;
+          // handleBluetoothError("WATERCTL INTERNAL Device not connected");
+          console.log("Device not connected");
+          // 尝试重新连接
+          disconnect();
+        }
+      })
+      .catch((error) => {
+        console.error("Scan error:", error);
+        isScanning = false;
+        handleBluetoothError(error);
+      });
 
     // 直接连接指定设备
     // await connect(DEVICE_ADDRESS, () => {
@@ -335,13 +373,13 @@ export function handleButtonClick() {
 }
 
 //自动重连
-document.addEventListener("DOMContentLoaded", () => {
-  if (autoReconnect) {
-    setInterval(() => {
-      const mainButton = document.getElementById("main-button") as HTMLButtonElement;
-      if (mainButton.innerText == "开启") {
-        start();
-      }
-    }, 5000);
-  }
-});
+// document.addEventListener("DOMContentLoaded", () => {
+//   if (autoReconnect) {
+//     setInterval(() => {
+//       const mainButton = document.getElementById("main-button") as HTMLButtonElement;
+//       if (mainButton.innerText == "开启") {
+//         start();
+//       }
+//     }, 5000);
+//   }
+// });
