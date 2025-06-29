@@ -1,4 +1,4 @@
-import { resolveError } from "./errors";
+// import { resolveError } from "./errors";
 import { clearLogs, getLogs, isLogEmpty, log } from "./logger";
 import { endEpilogue, baAck, offlinebombFix, startPrologue, endPrologue } from "./payloads";
 import { makeStartEpilogue, makeUnlockResponse } from "./solvers";
@@ -50,7 +50,6 @@ class BluetoothManager {
   private recentDataMap = new Map<string, number>();
   private readonly MAX_DUPLICATE_COUNT = 2;
   private lastDataTimestamp = 0;
-  private isConnectionHealthy = false;
 
   // 获取当前连接状态
   getConnectionStage(): ConnectionStage {
@@ -70,12 +69,10 @@ class BluetoothManager {
     
     // 如果超过心跳间隔没有收到数据，认为连接不健康
     if (this.lastDataTimestamp > 0 && timeSinceLastData > HEARTBEAT_INTERVAL) {
-      this.isConnectionHealthy = false;
       log(`连接健康检查失败: ${timeSinceLastData}ms 未收到数据`);
       return false;
     }
     
-    this.isConnectionHealthy = true;
     return true;
   }
 
@@ -101,7 +98,6 @@ class BluetoothManager {
   // 处理连接丢失
   private async handleConnectionLoss(): Promise<void> {
     log("检测到连接丢失");
-    this.isConnectionHealthy = false;
     this.stopHeartbeat();
     
     if (this.autoReconnect && this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
@@ -244,7 +240,6 @@ class BluetoothManager {
     
     this.isStarted = false;
     this.device = null;
-    this.isConnectionHealthy = false;
     this.lastDataTimestamp = 0;
     clearLogs();
     this.clearTimeouts();
@@ -374,7 +369,7 @@ class BluetoothManager {
   }
 
   // 显示错误对话框
-  private async showErrorDialog(title: string, message: string): Promise<void> {
+  private async showErrorDialog(_title: string, message: string): Promise<void> {
     const dialogContent = document.getElementById("dialog-content") as HTMLParagraphElement;
     const dialogDebugContainer = document.getElementById("dialog-debug-container") as HTMLPreElement;
     const dialogDebugContent = document.getElementById("dialog-debug-content");
@@ -488,7 +483,7 @@ class BluetoothManager {
   }
 
   // 处理RXD数据类型
-  private async processRxdType(dType: number, data: Uint8Array, payload: Uint8Array): Promise<void> {
+  private async processRxdType(dType: number, data: Uint8Array, _payload: Uint8Array): Promise<void> {
     try {
       switch (dType) {
         case 0xB0:
