@@ -1,4 +1,4 @@
-// import { resolveError } from "./errors";
+import { resolveError } from "./errors";
 import { clearLogs, getLogs, isLogEmpty, log } from "./logger";
 import { endEpilogue, baAck, offlinebombFix, startPrologue, endPrologue } from "./payloads";
 import { makeStartEpilogue, makeUnlockResponse } from "./solvers";
@@ -17,7 +17,7 @@ const RXD_UUID = "0000f1f2-0000-1000-8000-00805f9b34fb";
 const SCAN_TIMEOUT = 15000;
 const CONNECTION_TIMEOUT = 10000;
 const RECONNECT_DELAY = 400;
-const MAX_RECONNECT_ATTEMPTS = 5;
+const MAX_RECONNECT_ATTEMPTS = Infinity;
 const RECONNECT_BACKOFF_MULTIPLIER = 1.5;
 const DIALOG_AUTO_CLOSE_DELAY = 3000;
 const DUPLICATE_CLEANUP_DELAY = 5000;
@@ -308,7 +308,7 @@ class BluetoothManager {
     if (this.autoReconnect && this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
       await this.scheduleReconnect();
     } else {
-      await this.showErrorDialog("连接错误", "设备连接失败，请检查设备是否在范围内并重试。");
+      await this.showErrorDialog("", "NetworkError: Connection failed");
       await this.disconnect();
     }
   }
@@ -319,7 +319,7 @@ class BluetoothManager {
     this.setConnectionStage(ConnectionStage.ERROR);
     this.updateUi(ConnectionStage.ERROR);
     
-    await this.showErrorDialog("连接超时", "设备响应超时，请检查设备状态并重试。");
+    await this.showErrorDialog("", "WATERCTL INTERNAL Operation timed out");
     
     if (this.autoReconnect && this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
       await this.scheduleReconnect();
@@ -334,7 +334,7 @@ class BluetoothManager {
     this.setConnectionStage(ConnectionStage.ERROR);
     this.updateUi(ConnectionStage.ERROR);
     
-    await this.showErrorDialog("权限错误", "蓝牙权限被拒绝，请在系统设置中启用蓝牙权限。");
+    await this.showErrorDialog("", "User denied the browser permission");
     await this.disconnect();
   }
 
@@ -344,7 +344,7 @@ class BluetoothManager {
     this.setConnectionStage(ConnectionStage.ERROR);
     this.updateUi(ConnectionStage.ERROR);
     
-    await this.showErrorDialog("设备未找到", "未找到目标设备，请确保设备已开启并在范围内。");
+    await this.showErrorDialog("", "GATT Error: Not supported");
     
     if (this.autoReconnect && this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
       await this.scheduleReconnect();
@@ -359,7 +359,7 @@ class BluetoothManager {
     this.setConnectionStage(ConnectionStage.ERROR);
     this.updateUi(ConnectionStage.ERROR);
     
-    await this.showErrorDialog("连接错误", `发生未知错误: ${error}`);
+    await this.showErrorDialog("", error?.toString() || "Unknown error");
     
     if (this.autoReconnect && this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
       await this.scheduleReconnect();
@@ -379,26 +379,32 @@ class BluetoothManager {
       return;
     }
 
-    // 显示错误信息
-    dialogContent.textContent = message;
+    try {
+      const errorCase = resolveError(message);
+      
+      // 显示错误信息
+      errorCase.output(dialogContent, message);
 
-    // 显示调试信息
-    dialogDebugContainer.style.display = "none";
-    if (!isLogEmpty()) {
-      dialogDebugContainer.style.display = "block";
-      dialogDebugContent.textContent = "调试信息：\n" + getLogs().join("\n");
-    }
-
-    const dialog = document.getElementById("dialog") as HTMLDialogElement;
-    if (dialog) {
-      dialog.showModal();
-
-      // 自动关闭对话框
-      if (this.autoReconnect) {
-        setTimeout(() => {
-          dialog.close();
-        }, DIALOG_AUTO_CLOSE_DELAY);
+      // 显示调试信息
+      dialogDebugContainer.style.display = errorCase.showLogs ? "block" : "none";
+      if (errorCase.showLogs && !isLogEmpty()) {
+        dialogDebugContent.textContent = "调试信息：\n" + getLogs().join("\n");
       }
+
+      const dialog = document.getElementById("dialog") as HTMLDialogElement;
+      if (dialog) {
+        dialog.showModal();
+
+        // 自动关闭对话框
+        if (this.autoReconnect && !errorCase.isFatal) {
+          setTimeout(() => {
+            dialog.close();
+          }, DIALOG_AUTO_CLOSE_DELAY);
+        }
+      }
+    } catch (error) {
+      console.error("Error handling failed:", error);
+      dialogContent.textContent = "发生未知错误，请重试。";
     }
   }
 
