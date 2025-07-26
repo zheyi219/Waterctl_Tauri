@@ -13,725 +13,541 @@ const DEVICE_NAME = "Water36088";
 const TXD_UUID = "0000f1f1-0000-1000-8000-00805f9b34fb";
 const RXD_UUID = "0000f1f2-0000-1000-8000-00805f9b34fb";
 
-// 超时配置
-const SCAN_TIMEOUT = 15000;
-const CONNECTION_TIMEOUT = 10000;
-const RECONNECT_DELAY = 400;
-const MAX_RECONNECT_ATTEMPTS = Infinity;
-const RECONNECT_BACKOFF_MULTIPLIER = 1.5;
-const DIALOG_AUTO_CLOSE_DELAY = 3000;
-const DUPLICATE_CLEANUP_DELAY = 5000;
-const START_EPILOGUE_DELAY = 500;
-const HEARTBEAT_INTERVAL = 30000; // 30秒心跳检测
+// 重试配置
+const MAX_RETRY_COUNT = 3;
+const RETRY_DELAY = 1000; // 1秒
+const CONNECTION_TIMEOUT = 10000; // 10秒连接超时
+const OPERATION_TIMEOUT = 15000; // 15秒操作超时
 
-// 连接状态枚举
-enum ConnectionStage {
-  STANDBY = "standby",
-  SCANNING = "scanning",
-  CONNECTING = "connecting", 
-  CONNECTED = "connected",
-  READY = "ready",
-  ERROR = "error"
+let bluetoothdevice: BleDevice;
+
+// 状态变量
+let isStarted = false;
+let autoReconnect = true;
+let connectionAttempts = 0;
+let lastDisconnectTime = 0;
+let reconnectTimer: number | null = null;
+let isManualDisconnect = false;
+
+let pendingStartEpilogue: number; // workaround for determining new firmware, see handleRxdNotifications
+let pendingTimeoutMessage: number; // if we don't get a response in time, we should show an error message
+
+let countdown: CountdownController; //prepare for the countdown
+
+// 连接质量监控
+interface ConnectionQuality {
+  signalStrength: number;
+  errorCount: number;
+  lastSuccessTime: number;
+  consecutiveFailures: number;
 }
 
-// 蓝牙设备状态管理
-class BluetoothManager {
-  private device: BleDevice | null = null;
-  private isStarted = false;
-  private autoReconnect = true;
-  private currentStage: ConnectionStage = ConnectionStage.STANDBY;
-  private reconnectAttempts = 0;
-  private reconnectTimer: number | null = null;
-  private heartbeatTimer: number | null = null;
-  private connectionTimeout: number | null = null;
-  private pendingStartEpilogue: number | null = null;
-  private pendingTimeoutMessage: number | null = null;
-  private countdown: CountdownController | null = null;
-  private recentDataMap = new Map<string, number>();
-  private readonly MAX_DUPLICATE_COUNT = 2;
-  private lastDataTimestamp = 0;
+let connectionQuality: ConnectionQuality = {
+  signalStrength: 0,
+  errorCount: 0,
+  lastSuccessTime: Date.now(),
+  consecutiveFailures: 0
+};
 
-  // 获取当前连接状态
-  getConnectionStage(): ConnectionStage {
-    return this.currentStage;
-  }
-
-  // 设置连接状态
-  private setConnectionStage(stage: ConnectionStage): void {
-    this.currentStage = stage;
-    log(`连接状态变更: ${stage}`);
-  }
-
-  // 检查连接健康状态
-  private checkConnectionHealth(): boolean {
-    const now = Date.now();
-    const timeSinceLastData = now - this.lastDataTimestamp;
+// 带重试机制的发送函数
+async function writeValueWithRetry(value: Uint8Array, retryCount = 0): Promise<void> {
+  const msg = "TXD: " + bufferToHexString(value);
+  log(msg);
+  
+  try {
+    await send(TXD_UUID, value);
+    connectionQuality.lastSuccessTime = Date.now();
+    connectionQuality.consecutiveFailures = 0;
+  } catch (error) {
+    connectionQuality.errorCount++;
+    connectionQuality.consecutiveFailures++;
     
-    // 如果超过心跳间隔没有收到数据，认为连接不健康
-    if (this.lastDataTimestamp > 0 && timeSinceLastData > HEARTBEAT_INTERVAL) {
-      log(`连接健康检查失败: ${timeSinceLastData}ms 未收到数据`);
-      return false;
-    }
-    
-    return true;
-  }
-
-  // 启动心跳检测
-  private startHeartbeat(): void {
-    this.stopHeartbeat();
-    this.heartbeatTimer = window.setInterval(() => {
-      if (!this.checkConnectionHealth()) {
-        log("连接不健康，尝试重连");
-        this.handleConnectionLoss();
-      }
-    }, HEARTBEAT_INTERVAL);
-  }
-
-  // 停止心跳检测
-  private stopHeartbeat(): void {
-    if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
-    }
-  }
-
-  // 处理连接丢失
-  private async handleConnectionLoss(): Promise<void> {
-    log("检测到连接丢失");
-    this.stopHeartbeat();
-    
-    if (this.autoReconnect && this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-      await this.scheduleReconnect();
+    if (retryCount < MAX_RETRY_COUNT) {
+      log(`发送失败，正在重试 (${retryCount + 1}/${MAX_RETRY_COUNT}): ${error}`);
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * (retryCount + 1)));
+      return writeValueWithRetry(value, retryCount + 1);
     } else {
-      await this.disconnect();
+      log(`发送失败，已达到最大重试次数: ${error}`);
+      throw error;
     }
   }
+}
 
-  // 安排重连
-  private async scheduleReconnect(): Promise<void> {
-    this.reconnectAttempts++;
-    const delay = RECONNECT_DELAY * Math.pow(RECONNECT_BACKOFF_MULTIPLIER, this.reconnectAttempts - 1);
+// 向后兼容的函数
+async function writeValue(value: Uint8Array) {
+  return writeValueWithRetry(value);
+}
+
+// 带重试机制的订阅函数
+async function subscribeWithRetry(uuid: string, callback: (data: Uint8Array) => void, retryCount = 0): Promise<void> {
+  try {
+    await subscribe(uuid, callback);
+    connectionQuality.lastSuccessTime = Date.now();
+    connectionQuality.consecutiveFailures = 0;
+    log(`成功订阅 ${uuid}`);
+  } catch (error) {
+    connectionQuality.errorCount++;
+    connectionQuality.consecutiveFailures++;
     
-    log(`安排重连 (尝试 ${this.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})，延迟: ${delay}ms`);
-    
-    this.reconnectTimer = window.setTimeout(async () => {
-      this.reconnectTimer = null;
-      if (this.autoReconnect && this.currentStage !== ConnectionStage.STANDBY) {
-        await this.start();
-      }
-    }, delay);
-  }
-
-  // 重置重连计数
-  private resetReconnectAttempts(): void {
-    this.reconnectAttempts = 0;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-  }
-
-  // 设置连接超时
-  private setupConnectionTimeout(): void {
-    this.clearConnectionTimeout();
-    this.connectionTimeout = window.setTimeout(() => {
-      log("连接超时");
-      this.handleConnectionLoss();
-    }, CONNECTION_TIMEOUT);
-  }
-
-  // 清除连接超时
-  private clearConnectionTimeout(): void {
-    if (this.connectionTimeout) {
-      clearTimeout(this.connectionTimeout);
-      this.connectionTimeout = null;
-    }
-  }
-
-  // 写入数据到设备（带重试）
-  private async writeValue(value: Uint8Array, retryCount = 3): Promise<void> {
-    const msg = "TXD: " + bufferToHexString(value);
-    log(msg);
-    
-    for (let attempt = 1; attempt <= retryCount; attempt++) {
-      try {
-        await send(TXD_UUID, value);
-        log(`数据发送成功 (尝试 ${attempt}/${retryCount})`);
-        return;
-      } catch (error: unknown) {
-        log(`数据发送失败 (尝试 ${attempt}/${retryCount}): ${error}`);
-        
-        if (attempt === retryCount) {
-          throw error;
-        }
-        
-        // 等待一段时间后重试
-        await new Promise(resolve => setTimeout(resolve, 100 * attempt));
-      }
-    }
-  }
-
-  // 更新UI状态
-  updateUi(stage: ConnectionStage): void {
-    const mainButton = document.getElementById("main-button") as HTMLButtonElement;
-    const deviceName = document.getElementById("device-name") as HTMLSpanElement;
-    const counterElement = document.getElementById("counter") as HTMLElement;
-
-    if (!mainButton || !deviceName) {
-      console.error("UI elements not found");
-      return;
-    }
-
-    switch (stage) {
-      case ConnectionStage.SCANNING:
-      case ConnectionStage.CONNECTING:
-        mainButton.textContent = "请稍候";
-        mainButton.disabled = true;
-        deviceName.textContent = `连接中：${this.device?.name || "未知设备"}`;
-        break;
-      case ConnectionStage.CONNECTED:
-        mainButton.textContent = "请稍候";
-        mainButton.disabled = true;
-        deviceName.textContent = `已连接：${this.device?.name || "未知设备"}`;
-        break;
-      case ConnectionStage.READY:
-        mainButton.textContent = "结束";
-        mainButton.disabled = false;
-        this.countdown = startCountdown(420, counterElement, () => {
-          console.log("时间到！");
-        });
-        break;
-      case ConnectionStage.STANDBY:
-      case ConnectionStage.ERROR:
-        mainButton.textContent = "开启";
-        mainButton.disabled = false;
-        deviceName.textContent = "未连接";
-        if (this.countdown) {
-          this.countdown.stop();
-          this.countdown = null;
-        }
-        break;
-    }
-  }
-
-  // 清理超时定时器
-  private clearTimeouts(): void {
-    if (this.pendingStartEpilogue) {
-      clearTimeout(this.pendingStartEpilogue);
-      this.pendingStartEpilogue = null;
-    }
-    if (this.pendingTimeoutMessage) {
-      clearTimeout(this.pendingTimeoutMessage);
-      this.pendingTimeoutMessage = null;
-    }
-    this.clearConnectionTimeout();
-    this.stopHeartbeat();
-  }
-
-  // 断开连接
-  async disconnect(): Promise<void> {
-    try {
-      if (this.device?.isConnected) {
-        await bleDisconnect();
-      }
-    } catch (error: unknown) {
-      console.error("断开连接错误:", error);
-    }
-    
-    this.isStarted = false;
-    this.device = null;
-    this.lastDataTimestamp = 0;
-    clearLogs();
-    this.clearTimeouts();
-    this.resetReconnectAttempts();
-    this.setConnectionStage(ConnectionStage.STANDBY);
-    this.updateUi(ConnectionStage.STANDBY);
-  }
-
-  // 错误处理
-  async handleBluetoothError(error: unknown): Promise<void> {
-    if (!error) return;
-
-    const errorString = error.toString();
-    log(`蓝牙错误: ${errorString}`);
-
-    // 忽略用户取消操作
-    if (errorString.match(/User cancelled/) || errorString === "2") {
-      return;
-    }
-
-    // 根据错误类型决定处理策略
-    const errorType = this.classifyError(errorString);
-    
-    switch (errorType) {
-      case 'connection_lost':
-        await this.handleConnectionError();
-        break;
-      case 'timeout':
-        await this.handleTimeoutError();
-        break;
-      case 'permission':
-        await this.handlePermissionError();
-        break;
-      case 'device_not_found':
-        await this.handleDeviceNotFoundError();
-        break;
-      default:
-        await this.handleGenericError(error);
-        break;
-    }
-  }
-
-  // 错误分类
-  private classifyError(errorString: string): string {
-    if (errorString.includes('timeout') || errorString.includes('timed out')) {
-      return 'timeout';
-    }
-    if (errorString.includes('permission') || errorString.includes('denied')) {
-      return 'permission';
-    }
-    if (errorString.includes('not found') || errorString.includes('device not found')) {
-      return 'device_not_found';
-    }
-    if (errorString.includes('disconnect') || errorString.includes('connection lost')) {
-      return 'connection_lost';
-    }
-    return 'generic';
-  }
-
-  // 处理连接错误
-  private async handleConnectionError(): Promise<void> {
-    log("处理连接错误");
-    this.setConnectionStage(ConnectionStage.ERROR);
-    this.updateUi(ConnectionStage.ERROR);
-    
-    if (this.autoReconnect && this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-      await this.scheduleReconnect();
+    if (retryCount < MAX_RETRY_COUNT) {
+      log(`订阅失败，正在重试 (${retryCount + 1}/${MAX_RETRY_COUNT}): ${error}`);
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * (retryCount + 1)));
+      return subscribeWithRetry(uuid, callback, retryCount + 1);
     } else {
-      await this.showErrorDialog("", "NetworkError: Connection failed");
-      await this.disconnect();
+      log(`订阅失败，已达到最大重试次数: ${error}`);
+      throw error;
     }
   }
+}
 
-  // 处理超时错误
-  private async handleTimeoutError(): Promise<void> {
-    log("处理超时错误");
-    this.setConnectionStage(ConnectionStage.ERROR);
-    this.updateUi(ConnectionStage.ERROR);
-    
-    await this.showErrorDialog("", "WATERCTL INTERNAL Operation timed out");
-    
-    if (this.autoReconnect && this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-      await this.scheduleReconnect();
-    } else {
-      await this.disconnect();
-    }
+// UI控制函数
+function updateUi(stage: "pending" | "ok" | "standby") {
+  const mainButton = document.getElementById("main-button")! as HTMLButtonElement;
+  const deviceName = document.getElementById("device-name")! as HTMLSpanElement;
+  const counterElement = document.getElementById("counter") as HTMLElement;
+
+  switch (stage) {
+    case "pending":
+      mainButton.textContent = "请稍候";
+      mainButton.disabled = true;
+      deviceName.textContent = "已连接：" + bluetoothdevice.name!;
+      break;
+    case "ok":
+      mainButton.textContent = "结束";
+      mainButton.disabled = false;
+      //start countdown
+      countdown = startCountdown(420, counterElement, () => {
+        console.log("时间到！");
+      });
+      break;
+    case "standby":
+      mainButton.textContent = "开启";
+      mainButton.disabled = false;
+      deviceName.textContent = "未连接";
+      //countdown end
+      if (countdown) countdown.stop();
+      break;
   }
+}
 
-  // 处理权限错误
-  private async handlePermissionError(): Promise<void> {
-    log("处理权限错误");
-    this.setConnectionStage(ConnectionStage.ERROR);
-    this.updateUi(ConnectionStage.ERROR);
-    
-    await this.showErrorDialog("", "User denied the browser permission");
-    await this.disconnect();
-  }
-
-  // 处理设备未找到错误
-  private async handleDeviceNotFoundError(): Promise<void> {
-    log("处理设备未找到错误");
-    this.setConnectionStage(ConnectionStage.ERROR);
-    this.updateUi(ConnectionStage.ERROR);
-    
-    await this.showErrorDialog("", "GATT Error: Not supported");
-    
-    if (this.autoReconnect && this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-      await this.scheduleReconnect();
-    } else {
-      await this.disconnect();
-    }
-  }
-
-  // 处理通用错误
-  private async handleGenericError(error: unknown): Promise<void> {
-    log("处理通用错误");
-    this.setConnectionStage(ConnectionStage.ERROR);
-    this.updateUi(ConnectionStage.ERROR);
-    
-    await this.showErrorDialog("", error?.toString() || "Unknown error");
-    
-    if (this.autoReconnect && this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-      await this.scheduleReconnect();
-    } else {
-      await this.disconnect();
-    }
-  }
-
-  // 显示错误对话框
-  private async showErrorDialog(_title: string, message: string): Promise<void> {
-    const dialogContent = document.getElementById("dialog-content") as HTMLParagraphElement;
-    const dialogDebugContainer = document.getElementById("dialog-debug-container") as HTMLPreElement;
-    const dialogDebugContent = document.getElementById("dialog-debug-content");
-
-    if (!dialogContent || !dialogDebugContainer || !dialogDebugContent) {
-      console.error("Dialog elements not found");
-      return;
-    }
-
-    try {
-      const errorCase = resolveError(message);
-      
-      // 显示错误信息
-      errorCase.output(dialogContent, message);
-
-      // 显示调试信息
-      dialogDebugContainer.style.display = errorCase.showLogs ? "block" : "none";
-      if (errorCase.showLogs && !isLogEmpty()) {
-        dialogDebugContent.textContent = "调试信息：\n" + getLogs().join("\n");
-      }
-
-      const dialog = document.getElementById("dialog") as HTMLDialogElement;
-      if (dialog) {
-        dialog.showModal();
-
-        // 自动关闭对话框
-        if (this.autoReconnect && !errorCase.isFatal) {
-          setTimeout(() => {
-            dialog.close();
-          }, DIALOG_AUTO_CLOSE_DELAY);
-        }
-      }
-    } catch (error) {
-      console.error("Error handling failed:", error);
-      dialogContent.textContent = "发生未知错误，请重试。";
-    }
-  }
-
-  // 设置超时消息
-  private setupTimeoutMessage(): void {
-    if (!this.pendingTimeoutMessage) {
-      this.pendingTimeoutMessage = window.setTimeout(() => {
-        this.handleBluetoothError("WATERCTL INTERNAL Operation timed out");
-      }, SCAN_TIMEOUT);
-    }
-  }
-
-  // 处理重复数据
-  private isDuplicateData(data: Uint8Array): boolean {
-    const dataKey = bufferToHexString(data);
-    const currentCount = this.recentDataMap.get(dataKey) || 0;
-
-    if (currentCount >= this.MAX_DUPLICATE_COUNT - 1) {
-      log(`忽略重复数据: ${dataKey} (第${currentCount + 1}次)`);
-      return true;
-    }
-
-    this.recentDataMap.set(dataKey, currentCount + 1);
-
-    // 清理过期数据
-    setTimeout(() => {
-      this.recentDataMap.delete(dataKey);
-    }, DUPLICATE_CLEANUP_DELAY);
-
+// 智能断连逻辑
+function shouldReconnect(): boolean {
+  const now = Date.now();
+  const timeSinceLastDisconnect = now - lastDisconnectTime;
+  
+  // 如果是手动断连，不自动重连
+  if (isManualDisconnect) {
     return false;
   }
+  
+  // 如果连续失败次数过多，延长重连间隔
+  if (connectionQuality.consecutiveFailures >= 5) {
+    return timeSinceLastDisconnect > 30000; // 30秒后再重连
+  }
+  
+  // 如果错误率过高，延长重连间隔
+  if (connectionQuality.errorCount > 10) {
+    return timeSinceLastDisconnect > 10000; // 10秒后再重连
+  }
+  
+  // 正常情况下的重连间隔
+  return timeSinceLastDisconnect > 2000; // 2秒后重连
+}
 
-  // 处理RXD数据
-  async handleRxdData(data: Uint8Array): Promise<void> {
-    // 更新最后数据时间戳
-    this.lastDataTimestamp = Date.now();
+// 计算重连延迟
+function getReconnectDelay(): number {
+  const baseDelay = 2000; // 基础延迟2秒
+  const maxDelay = 30000; // 最大延迟30秒
+  
+  // 根据连接尝试次数计算指数退避延迟
+  const exponentialDelay = Math.min(baseDelay * Math.pow(2, connectionAttempts), maxDelay);
+  
+  // 根据连接质量调整延迟
+  const qualityMultiplier = Math.max(1, connectionQuality.consecutiveFailures * 0.5);
+  
+  return Math.min(exponentialDelay * qualityMultiplier, maxDelay);
+}
+
+// 优化的断开连接处理
+async function disconnect(manual: boolean = false) {
+  isManualDisconnect = manual;
+  lastDisconnectTime = Date.now();
+  
+  // 清除重连定时器
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  
+  try {
+    if (bluetoothdevice && bluetoothdevice.isConnected) {
+      log("正在断开连接...");
+      await bleDisconnect();
+      log("连接已断开");
+    }
+  } catch (error) {
+    console.error("Disconnect error:", error);
+    log(`断开连接时出错: ${error}`);
+  }
+  
+  isStarted = false;
+  if (manual) {
+    clearLogs();
+  }
+  clearAllTimers();
+  updateUi("standby");
+
+  // 智能重连逻辑
+  if (autoReconnect && !manual && shouldReconnect()) {
+    const delay = getReconnectDelay();
+    log(`将在 ${delay/1000} 秒后尝试重连...`);
     
-    // 检查重复数据
-    if (this.isDuplicateData(data)) {
+    reconnectTimer = window.setTimeout(() => {
+      if (autoReconnect && !isManualDisconnect) {
+        connectionAttempts++;
+        log(`开始第 ${connectionAttempts} 次重连尝试`);
+        start();
+      }
+    }, delay);
+  } else if (!manual) {
+    log("暂停自动重连，连接质量较差或重连过于频繁");
+  }
+}
+
+// 错误处理
+async function handleBluetoothError(error: unknown) {
+  // this is so fucking ugly but i have no choice
+  // you would never know how those shitty browsers behave
+  if (!error) throw error;
+
+  const e = error.toString();
+
+  if (e.match(/User cancelled/) || e == "2") {
+    // "2" is a weird behavior of Bluefy browser on iOS
+    return;
+  }
+
+  const dialogContent = document.getElementById("dialog-content") as HTMLParagraphElement;
+  const dialogDebugContainer = document.getElementById("dialog-debug-container") as HTMLPreElement;
+  const dialogDebugContent = document.getElementById("dialog-debug-content")!;
+
+  const { output, isFatal, showLogs } = resolveError(error);
+  output(dialogContent, error);
+
+  dialogDebugContainer.style.display = "none";
+  if (!isLogEmpty() && showLogs) {
+    dialogDebugContainer.style.display = "block";
+    dialogDebugContent.textContent = "调试信息：\n" + getLogs().join("\n");
+  }
+
+  const dialog = document.getElementById("dialog") as HTMLDialogElement;
+  dialog.showModal(); // 显示对话框
+
+  // 3秒后关闭对话框
+  if (autoReconnect) {
+    setTimeout(() => {
+      dialog.close(); // 关闭对话框
+    }, 3000);
+  }
+
+  if (isFatal || autoReconnect) await disconnect(false);
+}
+
+// RXD数据处理
+// 用于存储最近接收到的数据及其出现次数
+const recentDataMap = new Map<string, number>();
+// 最大重复次数
+const MAX_DUPLICATE_COUNT = 2;
+
+async function handleRxdData(data: Uint8Array) {
+  // 将数据转换为字符串，用于作为Map的键
+  const dataKey = bufferToHexString(data);
+  // 获取当前数据的重复次数
+  const currentCount = recentDataMap.get(dataKey) || 0;
+
+  // 如果重复次数达到最大限制，直接返回，不处理此次数据
+  if (currentCount >= MAX_DUPLICATE_COUNT - 1) {
+    return;
+  }
+
+  // 更新数据的重复次数
+  recentDataMap.set(dataKey, currentCount + 1);
+
+  // 一段时间后清除记录，避免内存泄漏
+  setTimeout(() => {
+    recentDataMap.delete(dataKey);
+  }, 5000);
+
+  //console.log("RXD: \ntype: "+typeof(data)+" \ncontent: " + data);
+  log("RXD: " + bufferToHexString(data));
+  // const dType = data[3];
+
+  try {
+    let payload = new Uint8Array(data);
+
+    // due to a bug in the firmware, it may send an AT command "AT+STAS?" via RXD; it doesn't start with FDFD09
+    if (payload[0] === 0x41 && payload[1] === 0x54 && payload[2] === 0x2b) {
       return;
     }
 
-    log("RXD: " + bufferToHexString(data));
+    if (payload[0] !== 0xfd && payload[0] !== 0x09) {
+      throw new Error("WATERCTL INTERNAL Unknown RXD data");
+    }
 
-    try {
-      let payload = new Uint8Array(data);
+    // sometimes, the first one or two bytes are missing maybe due to bad firmware implementation
+    // explanation: [0xFD, 0x09, ...] => [0xFD, 0xFD, 0x09, ...]
+    if (payload[1] === 0x09) {
+      payload = new Uint8Array([0xfd, ...payload]);
+    }
 
-      // 忽略AT命令
-      if (payload[0] === 0x41 && payload[1] === 0x54 && payload[2] === 0x2b) {
-        log("忽略AT命令");
-        return;
-      }
+    // explanation: [0x09, ...] => [0xFD, 0xFD, 0x09, ...]
+    if (payload[0] === 0x09) {
+      payload = new Uint8Array([0xfd, 0xfd, ...payload]);
+    }
 
-      if (payload[0] !== 0xfd && payload[0] !== 0x09) {
-        log(`无效数据格式: 0x${payload[0].toString(16)}`);
+    // ... and sometimes it sends a single byte 0xFD
+    if (payload.length < 4) {
+      return;
+    }
+
+    const dType = payload[3];
+
+    // https://github.com/prettier/prettier/issues/5158
+    // prettier-ignore
+    switch (dType) {
+      case 0xB0:
+      case 0xB1:
+        clearTimeout(pendingStartEpilogue);
+        pendingStartEpilogue = window.setTimeout(async () => {
+          await writeValue(makeStartEpilogue(bluetoothdevice.name!));
+        }, 500);
+        break;
+      case 0xAE:
+        clearTimeout(pendingStartEpilogue);
+        await writeValue(await makeUnlockResponse(data, bluetoothdevice.name!));
+        break;
+      case 0xAF:
+        switch (data[5]) {
+          case 0x55:
+            await writeValue(makeStartEpilogue(bluetoothdevice.name!, true));
+            break;
+          case 0x01: // key authentication failed; "err41" (bad key)
+          case 0x02: // ?
+          case 0x04: // "err43" (bad nonce)
+            throw new Error("WATERCTL INTERNAL Bad key");
+          default:
+            await writeValue(makeStartEpilogue(bluetoothdevice.name!, true));
+            throw new Error("WATERCTL INTERNAL Unknown RXD data");
+        }
+        break;
+      case 0xB2:
+        clearTimeout(pendingStartEpilogue);
+        clearTimeout(pendingTimeoutMessage);
+        isStarted = true;
+        updateUi("ok");
+        break;
+      case 0xB3:
+        await writeValue(endEpilogue);
+        await disconnect(false);
+        break;
+      case 0xAA: // telemetry, no need to respond
+      case 0xB5: // temperature settings related, no need to respond
+      case 0xB8: // unknown, no need to respond
+        break;
+      case 0xBA:
+        await writeValue(baAck);
+        break;
+      case 0xBC:
+        await writeValue(offlinebombFix);
+        break;
+      case 0xC8:
+        throw new Error("WATERCTL INTERNAL Refused");
+      default:
+        // console.warn("Unhandled RXD type:", dType);
         throw new Error("WATERCTL INTERNAL Unknown RXD data");
-      }
-
-      // 修复固件bug导致的数据缺失
-      if (payload[1] === 0x09) {
-        payload = new Uint8Array([0xfd, ...payload]);
-        log("修复数据格式: 添加前导0xFD");
-      }
-
-      if (payload[0] === 0x09) {
-        payload = new Uint8Array([0xfd, 0xfd, ...payload]);
-        log("修复数据格式: 添加双前导0xFD");
-      }
-
-      if (payload.length < 4) {
-        log("数据长度不足，忽略");
-        return;
-      }
-
-      const dType = payload[3];
-      log(`处理数据类型: 0x${dType.toString(16)}`);
-      await this.processRxdType(dType, data, payload);
-    } catch (error: unknown) {
-      log(`处理RXD数据失败: ${error}`);
-      await this.handleBluetoothError(error);
     }
+  } catch (error) {
+    handleBluetoothError(error);
   }
+}
 
-  // 处理RXD数据类型
-  private async processRxdType(dType: number, data: Uint8Array, _payload: Uint8Array): Promise<void> {
-    try {
-      switch (dType) {
-        case 0xB0:
-        case 0xB1:
-          log(`收到启动序章响应: 0x${dType.toString(16)}`);
-          this.clearTimeouts();
-          this.pendingStartEpilogue = window.setTimeout(async () => {
-            try {
-              await this.writeValue(makeStartEpilogue(this.device?.name || ""));
-              log("发送启动尾声");
-            } catch (error: unknown) {
-              log(`发送启动尾声失败: ${error}`);
-              await this.handleBluetoothError(error);
-            }
-          }, START_EPILOGUE_DELAY);
-          break;
+// 超时控制
+function setupTimeoutMessage() {
+  if (!pendingTimeoutMessage) {
+    pendingTimeoutMessage = window.setTimeout(() => {
+      handleBluetoothError("WATERCTL INTERNAL Operation timed out");
+    }, OPERATION_TIMEOUT);
+  }
+}
 
-        case 0xAE:
-          log("收到解锁请求");
-          this.clearTimeouts();
-          try {
-            await this.writeValue(await makeUnlockResponse(data, this.device?.name || ""));
-            log("发送解锁响应");
-          } catch (error: unknown) {
-            log(`发送解锁响应失败: ${error}`);
-            throw error;
+// 清除所有定时器
+function clearAllTimers() {
+  if (pendingStartEpilogue) {
+    clearTimeout(pendingStartEpilogue);
+    pendingStartEpilogue = 0;
+  }
+  if (pendingTimeoutMessage) {
+    clearTimeout(pendingTimeoutMessage);
+    pendingTimeoutMessage = 0;
+  }
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+}
+
+// 连接超时处理
+function createConnectionTimeout(): Promise<never> {
+  return new Promise((_, reject) => {
+    setTimeout(() => {
+      reject(new Error("WATERCTL INTERNAL Connection timeout"));
+    }, CONNECTION_TIMEOUT);
+  });
+}
+
+// 主业务流程
+let isScanning = false;
+let isConnecting = false;
+async function start() {
+  if (isScanning || isConnecting) {
+    console.log("Scanning or connecting...");
+    return;
+  }
+  
+  try {
+    isScanning = true;
+    log("开始扫描设备...");
+    
+    const scanPromise = new Promise<BleDevice | null>((resolve) => {
+      startScan((devices: BleDevice[]) => {
+        for (const device of devices) {
+          console.log(`Scanned device: ${device.name}, address: ${device.address}`);
+          if (device.name === DEVICE_NAME) {
+            console.log("Found device:", device);
+            stopScan();
+            resolve(device);
+            return;
           }
-          break;
+        }
+      }, 15000)
+        .then(() => {
+          console.log("Scan completed");
+          resolve(null);
+        })
+        .catch((error: unknown) => {
+          console.error("Scan error:", error);
+          resolve(null);
+        });
+    });
 
-        case 0xAF:
-          await this.handleAuthResponse(data[5]);
-          break;
+    const device = await scanPromise;
+    isScanning = false;
 
-        case 0xB2:
-          log("收到启动确认");
-          this.clearTimeouts();
-          this.isStarted = true;
-          this.setConnectionStage(ConnectionStage.READY);
-          this.updateUi(ConnectionStage.READY);
-          break;
-
-        case 0xB3:
-          log("收到结束请求");
-          try {
-            await this.writeValue(endEpilogue);
-            log("发送结束尾声");
-          } catch (error: unknown) {
-            log(`发送结束尾声失败: ${error}`);
-          }
-          await this.disconnect();
-          break;
-
-        case 0xAA: // telemetry
-          log("收到遥测数据");
-          break;
-        case 0xB5: // temperature settings
-          log("收到温度设置数据");
-          break;
-        case 0xB8: // unknown
-          log("收到未知数据");
-          break;
-
-        case 0xBA:
-          log("收到BA确认");
-          try {
-            await this.writeValue(baAck);
-            log("发送BA确认响应");
-          } catch (error: unknown) {
-            log(`发送BA确认响应失败: ${error}`);
-            throw error;
-          }
-          break;
-
-        case 0xBC:
-          log("收到离线炸弹修复");
-          try {
-            await this.writeValue(offlinebombFix);
-            log("发送离线炸弹修复响应");
-          } catch (error: unknown) {
-            log(`发送离线炸弹修复响应失败: ${error}`);
-            throw error;
-          }
-          break;
-
-        case 0xC8:
-          log("收到拒绝响应");
-          throw new Error("WATERCTL INTERNAL Refused");
-
-        default:
-          log(`未处理的数据类型: 0x${dType.toString(16)}`);
-          throw new Error("WATERCTL INTERNAL Unknown RXD data");
-      }
-    } catch (error: unknown) {
-      log(`处理数据类型 0x${dType.toString(16)} 失败: ${error}`);
-      throw error;
+    if (!device) {
+      log("未找到目标设备");
+      await disconnect(false);
+      return;
     }
-  }
 
-  // 处理认证响应
-  private async handleAuthResponse(responseCode: number): Promise<void> {
+    bluetoothdevice = device;
+    updateUi("pending");
+    isConnecting = true;
+    
     try {
-      switch (responseCode) {
-        case 0x55:
-          await this.writeValue(makeStartEpilogue(this.device?.name || "", true));
-          break;
-        case 0x01: // key authentication failed
-        case 0x02: // unknown error
-        case 0x04: // bad nonce
-          log(`认证失败，响应码: 0x${responseCode.toString(16)}`);
-          throw new Error("WATERCTL INTERNAL Bad key");
-        default:
-          await this.writeValue(makeStartEpilogue(this.device?.name || "", true));
-          log(`未知认证响应码: 0x${responseCode.toString(16)}`);
-          throw new Error("WATERCTL INTERNAL Unknown RXD data");
-      }
-    } catch (error: unknown) {
-      log(`处理认证响应失败: ${error}`);
-      throw error;
-    }
-  }
-
-  // 连接设备
-  private async connectDevice(device: BleDevice): Promise<void> {
-    this.device = device;
-    this.setConnectionStage(ConnectionStage.CONNECTING);
-    this.updateUi(ConnectionStage.CONNECTING);
-    this.setupConnectionTimeout();
-
-    try {
-      log(`尝试连接设备: ${device.name} (${device.address})`);
-      
-      await connect(device.address, () => {
-        console.log("设备断开连接");
-        this.handleConnectionLoss();
-      });
+      // 使用超时机制的连接
+      await Promise.race([
+        connect(device.address, () => {
+          console.log("Disconnected");
+          disconnect(false);
+        }),
+        createConnectionTimeout()
+      ]);
 
       log("成功连接设备");
-      this.clearConnectionTimeout();
-      this.setConnectionStage(ConnectionStage.CONNECTED);
-      this.updateUi(ConnectionStage.CONNECTED);
+      isConnecting = false;
+      
+      // 重置连接质量统计
+      connectionQuality.lastSuccessTime = Date.now();
+      connectionQuality.consecutiveFailures = 0;
+      connectionAttempts = 0; // 重置连接尝试次数
 
-      // 订阅RXD特征
-      log("订阅RXD特征...");
-      await subscribe(RXD_UUID, (data: Uint8Array) => this.handleRxdData(data));
-      log("成功订阅RXD特征");
+      // 使用带重试的订阅
+      await subscribeWithRetry(RXD_UUID, handleRxdData);
 
-      // 发送启动序章
-      log("发送启动序章...");
-      await this.writeValue(startPrologue);
+      // 使用带重试的发送
+      await writeValueWithRetry(startPrologue);
       log("成功发送启动序章");
 
-      // 启动心跳检测
-      this.startHeartbeat();
-      log("启动心跳检测");
+      setupTimeoutMessage();
 
-    } catch (error: unknown) {
-      log(`连接设备失败: ${error}`);
-      this.clearConnectionTimeout();
-      this.setConnectionStage(ConnectionStage.ERROR);
-      this.updateUi(ConnectionStage.ERROR);
-      await this.handleBluetoothError(error);
-    }
-  }
-
-  // 开始扫描和连接
-  async start(): Promise<void> {
-    if (this.currentStage === ConnectionStage.SCANNING || 
-        this.currentStage === ConnectionStage.CONNECTING) {
-      console.log("正在扫描或连接中...");
-      return;
+    } catch (error) {
+      isConnecting = false;
+      isScanning = false;
+      log(`连接或初始化失败: ${error}`);
+      handleBluetoothError(error);
     }
 
-    try {
-      this.setConnectionStage(ConnectionStage.SCANNING);
-      this.updateUi(ConnectionStage.SCANNING);
-      console.log("开始扫描蓝牙设备...");
-
-      let deviceFound = false;
-      
-      await new Promise<void>((resolve, reject) => {
-        const scanTimeout = setTimeout(() => {
-          console.log("扫描超时");
-          if (!deviceFound) {
-            this.setConnectionStage(ConnectionStage.ERROR);
-            this.updateUi(ConnectionStage.ERROR);
-            this.handleConnectionLoss();
-          }
-          resolve();
-        }, SCAN_TIMEOUT);
-
-        startScan((devices: BleDevice[]) => {
-          for (const device of devices) {
-            console.log(`扫描到设备: ${device.name}, 地址: ${device.address}`);
-            if (device.name === DEVICE_NAME) {
-              console.log("找到目标设备:", device);
-              deviceFound = true;
-              clearTimeout(scanTimeout);
-              stopScan();
-              this.connectDevice(device).then(resolve).catch(reject);
-              return;
-            }
-          }
-        }, SCAN_TIMEOUT);
-      });
-
-    } catch (error: unknown) {
-      log(`启动失败: ${error}`);
-      this.setConnectionStage(ConnectionStage.ERROR);
-      this.updateUi(ConnectionStage.ERROR);
-      await this.handleBluetoothError(error);
-    }
-  }
-
-  // 结束操作
-  async end(): Promise<void> {
-    try {
-      log("开始结束操作...");
-      await this.writeValue(endPrologue);
-      log("发送结束序章成功");
-      this.setupTimeoutMessage();
-    } catch (error: unknown) {
-      log(`结束操作失败: ${error}`);
-      await this.handleBluetoothError(error);
-    }
-  }
-
-  // 按钮点击处理
-  handleButtonClick(): void {
-    if (this.isStarted) {
-      log("用户点击结束按钮");
-      this.end();
-    } else {
-      log("用户点击开始按钮");
-      this.start();
-    }
+  } catch (error) {
+    isScanning = false;
+    isConnecting = false;
+    log(`启动过程出错: ${error}`);
+    handleBluetoothError(error);
   }
 }
 
-// 创建全局蓝牙管理器实例
-const bluetoothManager = new BluetoothManager();
-
-// 导出按钮处理函数
-export function handleButtonClick(): void {
-  bluetoothManager.handleButtonClick();
+async function end() {
+  try {
+    await writeValueWithRetry(endPrologue);
+    setupTimeoutMessage();
+  } catch (error) {
+    handleBluetoothError(error);
+  }
 }
+
+// 手动断开连接
+export function manualDisconnect() {
+  isManualDisconnect = true;
+  autoReconnect = false;
+  disconnect(true);
+}
+
+// 启用自动重连
+export function enableAutoReconnect() {
+  autoReconnect = true;
+  isManualDisconnect = false;
+  connectionQuality.consecutiveFailures = 0;
+  connectionAttempts = 0;
+}
+
+// 获取连接状态
+export function getConnectionStatus() {
+  return {
+    isConnected: bluetoothdevice?.isConnected || false,
+    isStarted,
+    connectionQuality,
+    connectionAttempts,
+    autoReconnect,
+    isManualDisconnect
+  };
+}
+
+// 按钮事件处理
+export function handleButtonClick() {
+  if (isStarted) {
+    end();
+  } else {
+    start();
+  }
+}
+
+//自动重连
+// document.addEventListener("DOMContentLoaded", () => {
+//   if (autoReconnect) {
+//     setInterval(() => {
+//       const mainButton = document.getElementById("main-button") as HTMLButtonElement;
+//       if (mainButton.innerText == "开启") {
+//         start();
+//       }
+//     }, 5000);
+//   }
+// });
