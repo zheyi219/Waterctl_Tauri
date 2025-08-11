@@ -7,7 +7,7 @@ import { connect, disconnect as bleDisconnect, send, subscribe, startScan, BleDe
 import { startCountdown, CountdownController } from "./Countdown";
 
 // 设备常量
-const DEVICE_NAME = "Water36088";
+const DEVICE_NAME = "Water34952";
 //const DEVICE_ADDRESS = "6D:6C:00:02:73:63";
 // const SERVICE_UUID = "0000f1f0-0000-1000-8000-00805f9b34fb";
 const TXD_UUID = "0000f1f1-0000-1000-8000-00805f9b34fb";
